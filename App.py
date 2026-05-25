@@ -1,26 +1,24 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import io
 
 # --- 🔗 LINK YOUR GOOGLE SHEET ---
-GSHEET_URL = "PASTE_YOUR_GOOGLE_SHEET_URL_HERE" # Put your link here again!
-
-def get_csv_url(url):
-    if "/edit" in url:
-        return url.split("/edit")[0] + "/gviz/tq?tqx=out:csv"
-    return url
+GSHEET_URL = "PASTE_YOUR_GOOGLE_SHEET_URL_HERE" 
 
 @st.cache_data(ttl=5)
-def load_master_database():
+def get_data():
     try:
-        csv_url = get_csv_url(GSHEET_URL)
+        csv_url = GSHEET_URL.split("/edit")[0] + "/gviz/tq?tqx=out:csv"
         df = pd.read_csv(csv_url)
-        df.columns = [col.lower().strip() for col in df.columns]
+        df.columns = [c.lower().strip() for c in df.columns]
+        # Ensure conversion is numeric; default to 1 if blank
+        df['conversion_factor'] = pd.to_numeric(df['conversion_factor'], errors='coerce').fillna(1)
         return df
     except:
-        return pd.DataFrame(columns=['item_name', 'par_level', 'reorder_trigger'])
+        return pd.DataFrame(columns=['item_name', 'par_level', 'reorder_trigger', 'conversion_factor'])
 
-st.title("📦 Fast-Paste Order Guide")
+st.title("📦 Commissary Inventory Manager")
 
 # Password Protection
 password = st.text_input("Manager Password:", type="password")
@@ -29,27 +27,37 @@ if password == "shopmanager123":
     st.sidebar.markdown(f"[✏️ Edit Pars in Google Sheets]({GSHEET_URL})")
 
 st.subheader("📋 Paste Raw Inventory Data")
-st.write("Format: **item_name, in_stock** (one per line)")
-raw_data = st.text_area("Paste your list here:", height=200, placeholder="Milk, 2\nBread, 5\nEggs, 1")
+st.write("Format: **item_name, count, unit**")
+raw_data = st.text_area("Paste here:", placeholder="Focaccia, 1, Tray\nFocaccia, 5, Slice")
 
-if st.button("Run Calculation"):
+if st.button("Calculate Orders"):
     try:
-        # Convert pasted text into a table
         data = io.StringIO(raw_data)
-        inv_df = pd.read_csv(data, names=['item_name', 'in_stock'], header=None)
-        inv_df['item_name'] = inv_df['item_name'].str.lower().str.strip()
-        inv_df['in_stock'] = pd.to_numeric(inv_df['in_stock'], errors='coerce')
+        df_in = pd.read_csv(data, names=['item_name', 'qty', 'unit'], header=None)
+        df_in['item_name'] = df_in['item_name'].str.lower().str.strip()
         
-        master = load_master_database()
-        merged = pd.merge(inv_df, master, on='item_name', how='inner')
+        master = get_data()
         
-        merged['order_qty'] = merged.apply(
-            lambda row: max(0, row['par_level'] - row['in_stock']) if row['in_stock'] <= row['reorder_trigger'] else 0, axis=1
+        # Merge input with master database for conversion factors
+        merged = pd.merge(df_in, master, on='item_name', how='left')
+        
+        # Apply conversion factor
+        merged['total_units'] = merged['qty'] * merged['conversion_factor']
+        
+        # Combine duplicates by item name
+        totals = merged.groupby('item_name')[['total_units', 'par_level', 'reorder_trigger']].first().reset_index()
+        totals['current_stock'] = merged.groupby('item_name')['total_units'].sum().values
+        
+        # Calculate Order: (Par - Current) if below Trigger
+        totals['order_needed'] = np.where(
+            totals['current_stock'] <= totals['reorder_trigger'], 
+            np.ceil(totals['par_level'] - totals['current_stock']), 
+            0
         )
         
-        results = merged[merged['order_qty'] > 0][['item_name', 'in_stock', 'par_level', 'order_qty']]
+        # Show only items to order
+        final_orders = totals[totals['order_needed'] > 0][['item_name', 'current_stock', 'par_level', 'order_needed']]
+        st.table(final_orders)
         
-        st.subheader("🛒 Suggested Order")
-        st.table(results)
-    except:
-        st.error("Make sure you paste as 'Item, Count' (e.g., Milk, 5)")
+    except Exception as e:
+        st.error(f"Format error: {e}. Use 'item, count, unit'")
