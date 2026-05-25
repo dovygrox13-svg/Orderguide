@@ -3,7 +3,7 @@ import pandas as pd
 import io
 
 # --- 🔗 LINK YOUR GOOGLE SHEET ---
-GSHEET_URL = "PASTE_YOUR_GOOGLE_SHEET_URL_HERE"
+GSHEET_URL = "https://docs.google.com/spreadsheets/d/10YYPKcu0IPD1S4XBlzY4Vf2lM5likd5Rd_FYq7Owh1E/edit?usp=drivesdk"
 
 @st.cache_data(ttl=5)
 def get_master():
