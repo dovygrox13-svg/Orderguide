@@ -9,7 +9,6 @@ GSHEET_URL = "https://docs.google.com/spreadsheets/d/10YYPKcu0IPD1S4XBlzY4Vf2lM5
 def get_master():
     csv_url = GSHEET_URL.split("/edit")[0] + "/gviz/tq?tqx=out:csv"
     df = pd.read_csv(csv_url)
-    # Strip spaces from master headers
     df.columns = df.columns.str.strip()
     return df
 
@@ -26,25 +25,27 @@ else:
     
     if st.button("Run Calculation"):
         try:
-            # 1. Load Data
             df_in = pd.read_csv(io.StringIO(raw_data), sep='\t')
-            
-            # 2. CLEANUP: Strip whitespace and normalize headers
             df_in.columns = df_in.columns.str.strip()
             
-            # 3. Identify Numeric Column
-            numeric_cols = df_in.select_dtypes(include=[np.number]).columns
-            qty_col = numeric_cols[0] 
+            # THE FIX: Use position instead of name. 
+            # iloc[:, 1] means "All rows, second column"
+            item_col_name = df_in.columns[1] 
             
-            # 4. Aggregate by 'Item'
-            totals = df_in.groupby('Item')[qty_col].sum().reset_index()
+            # Sum any column that contains 'Qty' in the name
+            qty_cols = [c for c in df_in.columns if 'qty' in c.lower()]
+            df_in['total_raw_qty'] = df_in[qty_cols].sum(axis=1)
             
-            # 5. Merge with Master
+            # Group by the name of the second column
+            totals = df_in.groupby(item_col_name)['total_raw_qty'].sum().reset_index()
+            totals = totals.rename(columns={item_col_name: 'Item'})
+            
+            # Merge with Master (assuming master uses 'Item' as header)
             master = get_master()
             final = pd.merge(totals, master, on='Item', how='inner')
             
-            # 6. Math
-            final['total_units'] = final[qty_col] * pd.to_numeric(final['conversion_factor'], errors='coerce').fillna(1)
+            # Calculation
+            final['total_units'] = final['total_raw_qty'] * pd.to_numeric(final['conversion_factor'], errors='coerce').fillna(1)
             final['order_needed'] = np.where(
                 final['total_units'] <= pd.to_numeric(final['reorder_trigger'], errors='coerce'),
                 np.ceil(pd.to_numeric(final['par_level'], errors='coerce') - final['total_units']),
@@ -54,5 +55,4 @@ else:
             st.table(final[final['order_needed'] > 0][['Item', 'total_units', 'par_level', 'order_needed']])
             
         except Exception as e:
-            # Helpful error message: tells you exactly what columns it SAW
-            st.error(f"Error: {e}. The headers found in your data were: {list(df_in.columns)}")
+            st.error(f"Error: {e}")
