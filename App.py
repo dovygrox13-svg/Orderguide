@@ -1,116 +1,97 @@
 import streamlit as st
 import pandas as pd
-import io
 
-# Set up page config
-st.set_page_config(page_title="Restaurant Order Generator", layout="wide")
 
-# 1. INITIALIZE MASTER ITEM DATA (The Backend)
-# In a full production app, this could be saved to a CSV or database.
-if 'items_df' not in st.session_state:
-    # Starting data using your Focaccia example
-    st.session_state.items_df = pd.DataFrame([
-        {
-            "Item Name": "Focaccia Bread",
-            "Par Quantity (Trays)": 12.0,
-            "Trigger Level (Trays)": 11.1,
-            "Conversion Rate (Slices/Tray)": 16.0
-        }
-    ])
+GSHEET_URL = "https://docs.google.com/spreadsheets/d/10YYPKcu0IPD1S4XBlzY4Vf2lM5likd5Rd_FYq7Owh1E/edit?usp=drivesdk"
 
-# 2. SIDEBAR NAVIGATION
-st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", ["📋 Staff Portal", "⚙️ Manager Dashboard"])
+def get_csv_url(url):
+    if "/edit" in url:
+        return url.split("/edit")[0] + "/gviz/tq?tqx=out:csv"
+    return url
 
-# ---------------------------------------------------------
-# PAGE 1: STAFF PORTAL
-# ---------------------------------------------------------
-if page == "📋 Staff Portal":
-    st.title("📋 Restaurant365 Order Generator")
-    st.write("Copy the entire inventory report from R365 and paste it below.")
-    
-    # Text area for staff to paste raw data
-    pasted_data = st.text_area("Paste R365 Inventory Dump Here:", height=300, placeholder="Item Name\tQuantity\tLocation...")
-    
-    if st.button("🚀 Generate Order List", type="primary"):
-        if not pasted_data.strip():
-            st.error("Please paste some data first!")
+# Load live pars from Google Sheets
+@st.cache_data(ttl=5)  # Syncs with your sheet every 5 seconds
+def load_master_database():
+    try:
+        csv_url = get_csv_url(GSHEET_URL)
+        df = pd.read_csv(csv_url)
+        df.columns = [col.lower().strip() for col in df.columns]
+        df['par_level'] = pd.to_numeric(df['par_level'], errors='coerce').fillna(0)
+        df['reorder_trigger'] = pd.to_numeric(df['reorder_trigger'], errors='coerce').fillna(0)
+        df['item_name'] = df['item_name'].astype(str).str.lower().str.strip()
+        return df
+    except Exception as e:
+        return pd.DataFrame(columns=['item_name', 'par_level', 'reorder_trigger'])
+
+# --- APP LAYOUT ---
+st.set_page_config(page_title="Shop Order Guide", page_icon="📦", layout="centered")
+
+st.title("📦 Shop Order & Par Guide")
+st.write("This portal automatically compares your current inventory counts against the master par levels saved in your Google Sheet.")
+
+# --- MANAGER VIEW ---
+with st.sidebar:
+    st.header("🛠️ Manager Settings")
+    password = st.text_input("Enter Manager Password:", type="password")
+    if password == "shopmanager123":
+        st.success("Connected to Database!")
+        st.markdown(f"[✏️ Open Live Google Sheet to Edit Pars]({GSHEET_URL})")
+        st.subheader("Current Master Pars:")
+        st.dataframe(load_master_database(), use_container_width=True)
+
+st.divider()
+
+# --- STAFF CALCULATOR ---
+st.subheader("📋 Step 1: Upload Current Counts")
+uploaded_file = st.file_uploader("Drop today's inventory sheet here (Excel or CSV)", type=["csv", "xlsx"])
+
+if uploaded_file:
+    try:
+        # Read uploaded counts
+        if uploaded_file.name.endswith('.csv'):
+            inv_df = pd.read_csv(uploaded_file)
         else:
-            try:
-                # Convert pasted text into a dataframe (assuming Tab-separated from Excel/R365)
-                # If R365 uses commas, we can adjust 'sep' to ','
-                raw_df = pd.read_csv(io.StringIO(pasted_data), sep="\t")
-                
-                # Standardize column names to fix potential spacing issues
-                raw_df.columns = raw_df.columns.str.strip()
-                
-                # Dynamic column matching based on typical R365 exports
-                # Looks for columns containing 'item' or 'name', and 'qty' or 'count'
-                item_col = next((c for c in raw_df.columns if 'item' in c.lower() or 'name' in c.lower()), raw_df.columns[0])
-                qty_col = next((c for c in raw_df.columns if 'qty' in c.lower() or 'count' in c.lower() or 'on hand' in c.lower()), raw_df.columns[1])
-                
-                # Clean up the staff input data
-                staff_inventory = raw_df[[item_col, qty_col]].copy()
-                staff_inventory.columns = ["Item Name", "Current Count"]
-                staff_inventory["Current Count"] = pd.to_numeric(staff_inventory["Current Count"], errors='coerce').fillna(0)
-                
-                # Group by Item Name to combine duplicate items across different locations
-                combined_inventory = staff_inventory.groupby("Item Name", as_index=False)["Current Count"].sum()
-                
-                # Merge with Manager's master rules
-                master_rules = st.session_state.items_df
-                merged_df = pd.merge(master_rules, combined_inventory, on="Item Name", how="inner")
-                
-                # RUN THE MATH
-                # 1. Convert current count to Par Units (e.g., slices divided by 16 = trays)
-                merged_df["Current Stock (Converted Units)"] = merged_df["Current Count"] / merged_df["Conversion Rate (Slices/Tray)"]
-                
-                # 2. Filter for items that fall below or equal to the trigger level
-                order_needed = merged_df[merged_df["Current Stock (Converted Units)"] <= merged_df["Trigger Level (Trays)"]].copy()
-                
-                # 3. Calculate how much to order to get back to Par
-                order_needed["Order Quantity (Trays)"] = order_needed["Par Quantity (Trays)"] - order_needed["Current Stock (Converted Units)"]
-                
-                # Display Results
-                st.success("🎯 Order List Generated Successfully!")
-                
-                if order_needed.empty:
-                    st.balloons()
-                    st.info("Everything is fully stocked! No items need to be ordered right now.")
-                else:
-                    # Clean up table for display
-                    display_df = order_needed[["Item Name", "Current Count", "Current Stock (Converted Units)", "Par Quantity (Trays)", "Order Quantity (Trays)"]]
-                    display_df.columns = ["Item Name", "Current Count (Slices)", "Current Stock (Trays)", "Target Par (Trays)", "Amount To Order (Trays)"]
-                    
-                    st.dataframe(display_df.style.format({
-                        "Current Stock (Trays)": "{:.2f}",
-                        "Amount To Order (Trays)": "{:.2f}"
-                    }), use_container_width=True)
-                    
-            except Exception as e:
-                st.error(f"Format Error: Could not parse the pasted text. Make sure you included the column headers from R365. Error details: {e}")
-
-# ---------------------------------------------------------
-# PAGE 2: MANAGER DASHBOARD (Backend Settings)
-# ---------------------------------------------------------
-elif page == "⚙️ Manager Dashboard":
-    st.title("⚙️ Manager Backend Settings")
-    
-    # Simple password protection
-    password = st.text_input("Enter Manager Password to edit settings:", type="password")
-    
-    if password == "shopmanager123": # Change this to whatever password you want
-        st.success("Access Granted")
-        
-        st.subheader("Current Master Item Rules")
-        st.write("Adjust pars, triggers, and conversion rates directly in the table below:")
-        
-        # Make the dataframe editable!
-        edited_df = st.data_editor(st.session_state.items_df, num_rows="dynamic", use_container_width=True)
-        
-        if st.button("💾 Save Settings", type="primary"):
-            st.session_state.items_df = edited_df
-            st.toast("Settings saved successfully!")
+            inv_df = pd.read_excel(uploaded_file)
             
-    elif password:
-        st.error("Incorrect Password.")
+        # Clean uploaded headers
+        inv_df.columns = [col.lower().strip() for col in inv_df.columns]
+        
+        # Standardize items
+        if 'item_name' in inv_df.columns and 'in_stock' in inv_df.columns:
+            inv_df['item_name'] = inv_df['item_name'].astype(str).str.lower().str.strip()
+            inv_df['in_stock'] = pd.to_numeric(inv_df['in_stock'], errors='coerce').fillna(0)
+            
+            # Pull fresh data from Google Sheets
+            master_sheet = load_master_database()
+            
+            if master_sheet.empty:
+                st.error("Could not read data from Google Sheets. Make sure your link is correct and general access is set to 'Anyone with link'.")
+            else:
+                # Compare Uploaded Stock against Google Sheet Master Pars
+                merged = pd.merge(inv_df, master_sheet, on='item_name', how='inner')
+                
+                # Math calculation for ordering
+                merged['order_qty'] = merged.apply(
+                    lambda row: max(0, row['par_level'] - row['in_stock']) if row['in_stock'] <= row['reorder_trigger'] else 0, 
+                    axis=1
+                )
+                
+                # Filter out items that don't need ordering
+                order_sheet = merged[merged['order_qty'] > 0][['item_name', 'in_stock', 'par_level', 'order_qty']]
+                
+                st.subheader("🛒 Step 2: Your Suggested Order Sheet")
+                if not order_sheet.empty:
+                    # Capitalize for clean display
+                    order_sheet['item_name'] = order_sheet['item_name'].str.title()
+                    st.dataframe(order_sheet, use_container_width=True)
+                    
+                    # One-click download button for ordering
+                    csv = order_sheet.to_csv(index=False).encode('utf-8')
+                    st.download_button("📥 Download This Order List", csv, "needed_orders.csv", "text/csv")
+                else:
+                    st.success("✅ Everything is perfectly stocked! No orders needed right now.")
+        else:
+            st.error("Your uploaded file must have columns named exactly: 'item_name' and 'in_stock'")
+                
+    except Exception as e:
+        st.error(f"Error compiling order list: {e}")
